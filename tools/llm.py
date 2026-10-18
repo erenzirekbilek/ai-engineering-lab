@@ -1,28 +1,25 @@
-"""OpenAI Chat Completions etrafinda ince bir sarmalayici.
+"""Gemini Interactions API etrafinda ince bir sarmalayici.
 
 Tek sorumlulugu: istegi gonder, gecikme + token + maliyeti olc, logla,
 hatalari anlasilir bir mesaja cevir. Haftalik derslerin hepsi bunu kullanir.
+
+Not: Gemini'nin yeni Interactions API'si sohbet gecmisini sunucuda tutabilir
+(`previous_interaction_id`). 2. haftada bunu kullanacagiz.
 """
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import Any
 
-from openai import (
-    APIConnectionError,
-    APIStatusError,
-    AuthenticationError,
-    BadRequestError,
-    OpenAI,
-    RateLimitError,
-)
+import httpx
+from google import genai
+from google.genai import errors
 
 from .config import Settings, load_settings
-from .costs import estimate_cost
+from .costs import estimate_cost, supports_temperature
 from .logging_utils import log_event
-
-Message = dict[str, str]
 
 
 class LabError(RuntimeError):
@@ -33,86 +30,123 @@ class LabError(RuntimeError):
 class ChatResult:
     text: str
     model: str
+    interaction_id: str | None
     input_tokens: int
     output_tokens: int
+    thought_tokens: int
+    total_tokens: int
     latency_ms: int
     cost_usd: float | None
 
-    @property
-    def total_tokens(self) -> int:
-        return self.input_tokens + self.output_tokens
 
-
-def get_client(settings: Settings | None = None) -> OpenAI:
+def get_client(settings: Settings | None = None) -> genai.Client:
     settings = settings or load_settings()
     if not settings.is_ready:
         raise LabError(
-            "OPENAI_API_KEY bulunamadi. `cp .env.example .env` yapip anahtarini yaz."
+            "GEMINI_API_KEY bulunamadi. `cp .env.example .env` yapip "
+            "https://aistudio.google.com/apikey adresinden aldigin anahtari yaz."
         )
-    return OpenAI(api_key=settings.api_key)
+    return genai.Client(api_key=settings.api_key)
 
 
 def chat(
-    messages: list[Message],
+    user_input: Any,
     *,
     settings: Settings | None = None,
     model: str | None = None,
+    system_instruction: str | None = None,
     temperature: float | None = None,
-    max_tokens: int | None = None,
+    max_output_tokens: int | None = None,
+    previous_interaction_id: str | None = None,
 ) -> ChatResult:
-    """Tek bir chat istegi gonderir ve olculmus sonucu dondurur."""
+    """Tek bir istek gonderir ve olculmus sonucu dondurur."""
     settings = settings or load_settings()
     model = model or settings.model
-    temperature = settings.temperature if temperature is None else temperature
-    max_tokens = max_tokens or settings.max_tokens
+    max_output_tokens = max_output_tokens or settings.max_output_tokens
+
+    generation_config: dict[str, Any] = {"max_output_tokens": max_output_tokens}
+    # 3.6+ ve 4 ailesi temperature'i yok sayip deprecation uyarisi dondurur.
+    if supports_temperature(model):
+        generation_config["temperature"] = (
+            settings.temperature if temperature is None else temperature
+        )
+
+    body: dict[str, Any] = {
+        "model": model,
+        "input": user_input,
+        "generation_config": generation_config,
+    }
+    if system_instruction:
+        body["system_instruction"] = system_instruction
+    if previous_interaction_id:
+        body["previous_interaction_id"] = previous_interaction_id
 
     client = get_client(settings)
     started = time.perf_counter()
 
     try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
+        interaction = client.interactions.create(**body)
+    except errors.APIError as exc:
+        raise _fail(model, exc)
+    except httpx.HTTPError as exc:
+        raise _fail_simple(
+            "connection", model, "Google'a baglanilamadi. Ag baglantisini kontrol et.", exc
         )
-    except AuthenticationError as exc:
-        raise _fail("auth", model, "API anahtari gecersiz ya da suresi dolmus.", exc)
-    except RateLimitError as exc:
-        raise _fail("rate_limit", model, "Hiz/kota siniri asildi. Biraz bekleyip tekrar dene.", exc)
-    except BadRequestError as exc:
-        raise _fail("bad_request", model, f"Istek gecersiz (model adi veya parametre?): {exc}", exc)
-    except APIConnectionError as exc:
-        raise _fail("connection", model, "OpenAI'a baglanilamadi. Ag baglantisini kontrol et.", exc)
-    except APIStatusError as exc:
-        raise _fail("api_status", model, f"OpenAI {exc.status_code} dondu.", exc)
 
     latency_ms = int((time.perf_counter() - started) * 1000)
-    usage = response.usage
-    input_tokens = usage.prompt_tokens if usage else 0
-    output_tokens = usage.completion_tokens if usage else 0
-    cost = estimate_cost(model, input_tokens, output_tokens)
+    usage = getattr(interaction, "usage", None)
+    input_tokens = getattr(usage, "total_input_tokens", 0) or 0
+    output_tokens = getattr(usage, "total_output_tokens", 0) or 0
+    thought_tokens = getattr(usage, "total_thought_tokens", 0) or 0
+    total_tokens = getattr(usage, "total_tokens", 0) or (input_tokens + output_tokens)
+
+    cost = estimate_cost(model, input_tokens, output_tokens + thought_tokens)
 
     log_event(
         "chat.ok",
         model=model,
-        temperature=temperature,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        thought_tokens=thought_tokens,
+        total_tokens=total_tokens,
         latency_ms=latency_ms,
         cost_usd=cost,
     )
 
     return ChatResult(
-        text=response.choices[0].message.content or "",
+        text=interaction.output_text or "",
         model=model,
+        interaction_id=getattr(interaction, "id", None),
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        thought_tokens=thought_tokens,
+        total_tokens=total_tokens,
         latency_ms=latency_ms,
         cost_usd=cost,
     )
 
 
-def _fail(kind: str, model: str, message: str, exc: Exception) -> LabError:
+_MESSAGES = {
+    400: "Istek gecersiz (model adi veya parametre hatali olabilir).",
+    401: "API anahtari gecersiz. aistudio.google.com/apikey adresinden yenisini al.",
+    403: "Bu anahtarin bu modele erisimi yok. Ucretsiz kademede olmayan bir model olabilir.",
+    404: "Model bulunamadi. Model adini kontrol et.",
+    429: "Hiz/kota siniri asildi. Ucretsiz kademede dakikalik ve gunluk limit var; biraz bekle.",
+}
+
+
+def _fail(model: str, exc: errors.APIError) -> LabError:
+    code = getattr(exc, "code", None)
+    message = _MESSAGES.get(code) if isinstance(code, int) else None
+    if message is None:
+        message = (
+            f"Google {code} dondu."
+            if isinstance(code, int) and code >= 500
+            else f"Beklenmeyen API hatasi: {exc}"
+        )
+    return _fail_simple(f"api_{code}", model, message, exc)
+
+
+def _fail_simple(kind: str, model: str, message: str, exc: Exception) -> LabError:
     log_event("chat.error", kind=kind, model=model, detail=str(exc)[:500])
     return LabError(message)

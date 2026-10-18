@@ -18,7 +18,7 @@ class Settings:
     api_key: str | None
     model: str
     temperature: float
-    max_tokens: int
+    max_output_tokens: int
 
     @property
     def is_ready(self) -> bool:
@@ -26,11 +26,16 @@ class Settings:
 
 
 def load_settings() -> Settings:
-    """`.env` dosyasini yukler ve ayarlari dondurur."""
+    """`.env` dosyasini yukler ve ayarlari dondurur.
+
+    google-genai istemcisi anahtari GEMINI_API_KEY'den kendisi de okuyabilir,
+    ama anahtarin var olup olmadigini arayuzde gosterebilmek icin burada da
+    aciktan okuyoruz.
+    """
     load_dotenv(ROOT / ".env")
     return Settings(
-        api_key=os.getenv("OPENAI_API_KEY") or None,
-        model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-        temperature=float(os.getenv("OPENAI_TEMPERATURE", "0.7")),
-        max_tokens=int(os.getenv("OPENAI_MAX_TOKENS", "1024")),
+        api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or None,
+        model=os.getenv("GEMINI_MODEL", "gemini-3.8-flash"),
+        temperature=float(os.getenv("GEMINI_TEMPERATURE", "1.0")),
+        max_output_tokens=int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "1024")),
     )
