@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# --- AI Engineering Lab ---
+.env
+.env.local
+logs/*
+!logs/.gitkeep
+.DS_Store
+.streamlit/secrets.toml
+chroma_db/

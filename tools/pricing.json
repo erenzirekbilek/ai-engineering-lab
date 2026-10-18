@@ -1,0 +1,10 @@
+{
+  "_comment": "1M token basina USD. Guncel fiyat: https://platform.openai.com/docs/pricing - degistiginde bu dosyayi guncelle.",
+  "_updated": "2026-10-18",
+  "models": {
+    "gpt-4o-mini": { "input": 0.15, "output": 0.60 },
+    "gpt-4o":      { "input": 2.50, "output": 10.00 },
+    "gpt-4.1-mini":{ "input": 0.40, "output": 1.60 },
+    "gpt-4.1":     { "input": 2.00, "output": 8.00 }
+  }
+}
